@@ -2,6 +2,8 @@ import errno
 import json
 
 import zarr
+import matplotlib
+import matplotlib.axes
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 from matplotlib.backends.backend_qt5agg import (
@@ -11,6 +13,9 @@ from scipy.ndimage import map_coordinates
 
 
 class R2DWindow(QtWidgets.QMainWindow):
+
+    XY_VIEW = "X/Y"
+    THREE_PANEL_VIEW = "Three panel"
 
     def __init__(self):
         super(R2DWindow, self).__init__()
@@ -121,6 +126,14 @@ class R2DWindow(QtWidgets.QMainWindow):
         self.w_downsample.setMinimum(1)
         self.w_downsample.setMaximum(32)
         self.w_downsample.setValue(1)
+        hlayout = QtWidgets.QHBoxLayout()
+        group_layout.addLayout(hlayout)
+        hlayout.addWidget(QtWidgets.QLabel("View"))
+        self.w_view_choice = QtWidgets.QComboBox()
+        self.w_view_choice.addItems([self.XY_VIEW, self.THREE_PANEL_VIEW])
+        self.w_view_choice.setCurrentIndex(1)
+        self.w_view_choice.setEditable(False)
+        hlayout.addWidget(self.w_view_choice)
 
         self.show_button = QtWidgets.QPushButton("Show")
         left_layout.addWidget(self.show_button)
@@ -135,7 +148,7 @@ class R2DWindow(QtWidgets.QMainWindow):
         self.canvas = FigureCanvasQTAgg(self.figure)
         splitter.addWidget(self.canvas)
         self.addToolBar(NavigationToolbar(self.canvas, self))
-        self.axes = self.figure.add_subplot(1, 1, 1)
+        self.figure.add_subplot(1, 1, 1)
         self.canvas.draw()
 
     def open_fixed(self):
@@ -220,6 +233,21 @@ class R2DWindow(QtWidgets.QMainWindow):
             self.w_center_y.setValue(center_y)
 
     def on_show(self, *args):
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        self.figure.clf()
+        if self.w_view_choice.currentText() == self.XY_VIEW:
+            self.show_xy(self.figure.add_subplot(1, 1, 1))
+        else:
+            ax_xy = self.figure.add_subplot(2, 2, 1)
+            ax_xz = self.figure.add_subplot(2, 2, 2)
+            ax_yz = self.figure.add_subplot(2, 2, 4)
+            self.show_xy(ax_xy)
+            self.show_xz(ax_xz)
+            self.show_yz(ax_yz)
+        self.canvas.draw()
+        QtWidgets.QApplication.restoreOverrideCursor()
+
+    def show_xy(self, axes):
         downsample = self.w_downsample.value()
         fixed_slice = self.fixed_img[::downsample, ::downsample,
                                      self.fixed_img_z.value()].transpose()
@@ -244,7 +272,58 @@ class R2DWindow(QtWidgets.QMainWindow):
         cimg = np.zeros((fixed_slice.shape[0], fixed_slice.shape[1], 3), np.float32)
         cimg[:, : , 0] = fixed_slice
         map_coordinates(moving_slice, [yt, xt], cimg[:, :, 1])
-        self.axes.cla()
+        axes.cla()
         clip = np.quantile(cimg.flatten(), .90)
-        self.axes.imshow(np.clip(cimg, 0, clip) / clip)
-        self.canvas.draw()
+        axes.imshow(np.clip(cimg, 0, clip) / clip)
+        self.redo_axes_ticks(axes, self.fixed_img.shape[0], self.fixed_img.shape[1])
+
+    def redo_axes_ticks(self, axes:matplotlib.axes.Axes, x_len:int, y_len:int):
+        downsample = self.w_downsample.value()
+        x_stops = np.linspace(0, x_len, 6)
+        x_stops_downsampled = x_stops / downsample
+        axes.set_xticks(x_stops_downsampled)
+        axes.set_xticklabels(["%d" % x for x in x_stops])
+        y_stops = np.linspace(0, y_len, 6)[::-1]
+        y_stops_downsampled = y_stops / downsample
+        axes.set_yticks(y_stops_downsampled)
+        axes.set_yticklabels(["%d" % y for y in y_stops])
+
+    def show_xz(self, axes):
+        downsample = self.w_downsample.value()
+        y = self.fixed_img.shape[1] // 2
+        min_x = min(self.fixed_img.shape[0], self.moving_img.shape[0])
+        min_z = min(self.fixed_img.shape[2], self.moving_img.shape[2])
+        fixed_slice = self.fixed_img[:min_x:downsample, y,
+                                     :min_z:downsample].transpose()
+        moving_slice = self.moving_img[:min_x:downsample, y,
+                                       :min_z:downsample].transpose()
+        combined = np.stack([fixed_slice, moving_slice, np.zeros_like(fixed_slice)], 2).astype(np.float32)
+        clip = np.quantile(combined.flatten(), .90)
+        combined = np.clip(combined, 0, clip)
+        axes.imshow(combined)
+        z_fixed = self.fixed_img_z.value() // downsample
+        z_moving = self.moving_img_z.value() // downsample
+        axes.plot([0, min_x // downsample], [z_fixed, z_fixed])
+        axes.plot([0, min_x // downsample], [z_moving, z_moving])
+        self.redo_axes_ticks(axes, min_x, min_z)
+
+    def show_yz(self, axes):
+        downsample = self.w_downsample.value()
+        x = self.fixed_img.shape[0] // 2
+        min_y = min(self.fixed_img.shape[1], self.moving_img.shape[1])
+        min_z = min(self.fixed_img.shape[2], self.moving_img.shape[2])
+        fixed_slice = self.fixed_img[x,
+                                     :min_y:downsample,
+                                     :min_z:downsample]
+        moving_slice = self.moving_img[x,
+                                       :min_y:downsample,
+                                       :min_z:downsample]
+        combined = np.stack([fixed_slice, moving_slice, np.zeros_like(fixed_slice)], 2).astype(np.float32)
+        clip = np.quantile(combined.flatten(), .90)
+        combined = np.clip(combined, 0, clip)
+        axes.imshow(combined)
+        z_fixed = self.fixed_img_z.value() // downsample
+        z_moving = self.moving_img_z.value() // downsample
+        axes.plot([z_fixed, z_fixed], [0, min_y // downsample])
+        axes.plot([z_moving, z_moving], [0, min_y // downsample])
+        self.redo_axes_ticks(axes, min_z, min_y)
